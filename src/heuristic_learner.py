@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+import numpy as np  # <- added
 
 class HeuristicNet(nn.Module):
     def __init__(self):
@@ -23,8 +24,12 @@ def train_model(dataset, epochs=20, batch_size=32, lr=1e-3):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
-    states = torch.tensor([x for x, _ in dataset], dtype=torch.float32)
-    costs = torch.tensor([y for _, y in dataset], dtype=torch.float32).unsqueeze(1)
+    # Use NumPy for efficient conversion
+    states_np = np.array([x for x, _ in dataset], dtype=np.float32)
+    costs_np = np.array([y for _, y in dataset], dtype=np.float32).reshape(-1, 1)
+
+    states = torch.from_numpy(states_np)
+    costs = torch.from_numpy(costs_np)
 
     dataloader = DataLoader(TensorDataset(states, costs), batch_size=batch_size, shuffle=True)
 
