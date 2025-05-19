@@ -1,16 +1,18 @@
 import numpy as np
 import random
+import heapq
 
 class SlidingPuzzle:
     def __init__(self, board=None):
+        self.size = 4
         if board is None:
             self.board = self._create_solved_board()
         else:
-            self.board = np.array(board).reshape((4, 4))
+            self.board = np.array(board).reshape((self.size, self.size))
         self.goal = self._create_solved_board()
 
     def _create_solved_board(self):
-        return np.array(list(range(1, 16)) + [0]).reshape((4, 4))
+        return np.array(list(range(1, self.size**2)) + [0]).reshape((self.size, self.size))
 
     def is_solved(self):
         return np.array_equal(self.board, self.goal)
@@ -23,9 +25,9 @@ class SlidingPuzzle:
         x, y = self.find_blank()
         moves = []
         if x > 0: moves.append('up')
-        if x < 3: moves.append('down')
+        if x < self.size - 1: moves.append('down')
         if y > 0: moves.append('left')
-        if y < 3: moves.append('right')
+        if y < self.size - 1: moves.append('right')
         return moves
 
     def move(self, direction):
@@ -50,19 +52,44 @@ class SlidingPuzzle:
 
     def manhattan_distance(self):
         distance = 0
-        for i in range(4):
-            for j in range(4):
+        for i in range(self.size):
+            for j in range(self.size):
                 val = self.board[i, j]
                 if val == 0: continue
-                goal_x, goal_y = (val - 1) // 4, (val - 1) % 4
-                distance += abs(goal_x - i) + abs(goal_y - j)
+                gx, gy = (val-1) // self.size, (val-1) % self.size
+                distance += abs(gx - i) + abs(gy - j)
         return distance
-
-    def __str__(self):
-        return str(self.board)
 
     def to_array(self):
         return self.board.flatten()
 
-    def clone(self):
-        return SlidingPuzzle(self.board.copy())
+    def to_hashable(self):
+        return tuple(self.to_array())
+
+    def __str__(self):
+        return str(self.board)
+    
+    def to_one_hot(self):
+        """
+        Convert puzzle state to one-hot encoding as described in the paper:
+        - For each of the 16 numbers (0-15), encode:
+          - row position (4 bits one-hot)
+          - column position (4 bits one-hot)
+        - Total: 16 numbers * (4 + 4) = 128 bits (16 bytes)
+        """
+        one_hot = np.zeros(16 * 2 * 4, dtype=np.float32)  # 128-dimensional vector
+        
+        for number in range(16):  # All numbers from 0 to 15
+            # Find current position of this number
+            pos = np.where(self.board == number)
+            row, col = pos[0][0], pos[1][0]
+            
+            # Encode row (4 bits one-hot)
+            row_start = number * 8
+            one_hot[row_start + row] = 1.0
+            
+            # Encode column (4 bits one-hot)
+            col_start = number * 8 + 4
+            one_hot[col_start + col] = 1.0
+            
+        return one_hot
