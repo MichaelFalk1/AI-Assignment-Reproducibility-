@@ -115,16 +115,31 @@ class LikelyAdmissibleHeuristicLearner:
 
      # Add this before starting curriculum
     def warmup_wunn(self, device, n_samples=1000):
-        """Pretrain WUNN on random states"""
+        # Add this before starting curriculum
+        puzzle_class = SlidingPuzzle()
         optimizer = optim.Adam(self.wunn.parameters(), lr=0.01)
-        for _ in range(100):  # 100 warmup iterations
-            states = torch.randn(n_samples, 128).to(device)  # Random states
-            targets = torch.randn(n_samples, 1).to(device) * 50  # Random costs
+        criterion = nn.MSELoss()
+        
+        # Generate real puzzle states with approximate optimal costs
+        states = []
+        costs = []
+        for _ in range(n_samples):
+            puzzle = puzzle_class.shuffle(50)
+            cost = puzzle.manhattan_distance()  # Use your solver here
+            states.append(torch.tensor(puzzle.to_one_hot(), dtype=torch.float32))
+            costs.append(cost)
+        
+        states = torch.stack(states).to(device)
+        costs = torch.tensor(costs, dtype=torch.float32).to(device)
+        
+        for epoch in range(100):
             optimizer.zero_grad()
             outputs = self.wunn(states)
-            loss = nn.MSELoss()(outputs[:,0], targets.squeeze())
+            loss = criterion(outputs[:, 0], costs)  # Only train mean prediction here
+            print(f"[Warmup] Epoch {epoch}/100 - Loss: {loss.item():.4f}")
             loss.backward()
             optimizer.step()
+
     
     def run_curriculum(self, puzzle_class, num_iter=50):
         """Main learning loop"""
@@ -133,7 +148,7 @@ class LikelyAdmissibleHeuristicLearner:
             print(f"Current α: {self.alpha:.2f}, β: {self.beta:.4f}")
             task_generator = UncertaintyDrivenTaskGenerator(
                 self.wunn, self.device,
-                epsilon=self.epsilon,
+                epsilon=1,
                 kappa=self.kappa,
                 max_steps=1000,
                 min_depth=30
@@ -148,17 +163,16 @@ class LikelyAdmissibleHeuristicLearner:
                     current_tasks.append(task)
             
             y_q = np.quantile([y for _, y in self.memory_buffer], 0.95) if self.memory_buffer else 0
-            heuristic_fn = lambda s: self._rho_likely_admissible_heuristic(s, y_q)
+            heuristic_fn = lambda s: self.learn_heuristic(s, y_q)
             manhatten = SlidingPuzzle.manhattan_distance          
             
             
             
             for task in current_tasks:
-                print("Solving Tasks...")
                 h_fn = heuristic_fn(task)
-                print(f"MD: {task.manhattan_distance():2d} -> H: {h_fn:.1f} (α={self.alpha:.2f})")
+                print(f"MD: {task.manhattan_distance():2d} -> H: {h_fn:.1f} (α={self.alpha:.2f}) (Solved: {tasks_solved}/{len(current_tasks)})")
                 # NOTE remeber to change this back just doing this to test ffnn
-                path, cost = self._solve_task(task, manhatten)
+                path, cost = self._solve_task(task, heuristic_fn=heuristic_fn)
                 if path:
                     tasks_solved += 1
                     self._update_memory_buffer(path, cost)
@@ -186,54 +200,58 @@ class LikelyAdmissibleHeuristicLearner:
     #     quantile = mean + z_score * sigma_t
     #     return max(quantile.item(), 0)
 
-    def _rho_likely_admissible_heuristic(self, state, y_q, alpha=None):
-        """Improved heuristic with Manhattan distance blending and better scaling"""
+    
+
+    def learn_heuristic(self, state, y_q, alpha=None):
         alpha = alpha or self.alpha
-        
-        # Get Manhattan distance as fallback
         manhattan = state.manhattan_distance()
         
-        # Get neural network prediction
+        # Early training: use inflated Manhattan
+        if len(self.memory_buffer) < 15:
+            return manhattan * 1.1
+
         x = torch.tensor(state.to_one_hot(), dtype=torch.float32).unsqueeze(0).to(self.device)
         with torch.no_grad():
             mean, sigma_a, sigma_e = self.wunn.predict_with_uncertainty(x)
             
-            # Dynamic blending with Manhattan based on training progress
-            training_progress = min(1.0, len(self.memory_buffer) / 5000)
-            blend_factor = max(0, 1 - training_progress**2)  # Faster decay
-            
             # Combine uncertainties
-            sigma_t = sigma_a + self.epsilon * min(1.0, training_progress*2)
+            sigma_t = sigma_a + sigma_e
             
-            # Compute quantile
-            z_score = norm.ppf(alpha)
+            # Compute quantile estimate
+            z_score = norm.ppf(min(alpha, 0.95))  # Cap alpha for numerical stability
             nn_estimate = mean + z_score * sigma_t
             nn_estimate = max(nn_estimate.item(), 0)
             
-            # Blend with Manhattan
-            final_h = (1-blend_factor) * nn_estimate + blend_factor * manhattan
+            # Switching condition
+            if y_q is not None and mean.item() < y_q:
+                features = torch.cat([mean.unsqueeze(0), sigma_a.unsqueeze(0)], dim=1)
+                final_h = self.ffnn(features).item()
+            else:
+                final_h = nn_estimate  # Use the quantile estimate
             
-            # Ensure admissibility during early training
-            if len(self.memory_buffer) < 1000:
-                final_h = min(final_h, manhattan)
-                
+            # Ensure heuristic is at least Manhattan distance
+            final_h = max(final_h, manhattan)
+            
+            # Prevent extreme overestimation
+            final_h = min(final_h, manhattan * 2)
+            
             return final_h
-        
+         
     def _log_heuristic_stats(self):
         if len(self.memory_buffer) % 1000 == 0:
             test_states = [SlidingPuzzle().shuffle(i) for i in [10,20,30,40]]
             for s in test_states:
-                h = self._rho_likely_admissible_heuristic(s, 0)
+                h = self.learn_heuristic(s, 0)
                 print(f"MD: {s.manhattan_distance():2d} -> H: {h:.1f} (α={self.alpha:.2f})")
 
     def _solve_task(self, task, heuristic_fn):
-        """Solve task with time limit"""
+        
         start_time = time.time()
         path, cost = ida_star_search(task, heuristic_fn, timeout=self.t_max)
         return path, cost
 
     def _update_memory_buffer(self, path, cost):
-        """Update memory buffer with shape validation"""
+        
         for i, state in enumerate(path):
             if not state.is_solved():
                 try:
@@ -259,7 +277,7 @@ class LikelyAdmissibleHeuristicLearner:
                     print(f"Error updating memory buffer: {str(e)}")
 
     def _adjust_parameters(self, tasks_solved):
-        """Better alpha adaptation based on multiple factors"""
+        
         progress = len(self.memory_buffer) / self.memory_buffer_max
         
         # Base adjustment
@@ -275,46 +293,59 @@ class LikelyAdmissibleHeuristicLearner:
    
 
     def _train_wunn(self):
-        """Enhanced WUNN training for better uncertainty estimates"""
+        # Add target validation
+        
         if len(self.memory_buffer) < 100:
-            return  # Wait until we have enough data
-            
+            return
+
         states = torch.tensor(np.array([x for x, _ in self.memory_buffer]), dtype=torch.float32)
-        targets = torch.tensor(np.array([y for _, y in self.memory_buffer]), dtype=torch.float32).view(-1,1)
+        targets = torch.tensor([y for _, y in self.memory_buffer], dtype=torch.float32)
         
-        # Normalize targets
+        # Normalize targets and inputs
         target_mean, target_std = targets.mean(), targets.std()
-        normalized_targets = (targets - target_mean) / (target_std + 1e-6)
-        
+        targets = (targets - target_mean) / (target_std + 1e-6)
+        states = (states - states.mean(dim=0)) / (states.std(dim=0) + 1e-6)
+
         for epoch in range(100):
-            # Sample based on both uncertainty and recentness
+            self.wunn.train()
+            epoch_loss = 0.0
+            nll_loss_accum = 0.0
+            kl_loss_accum = 0.0
+
+            # Sample based on uncertainty + recency
             weights = torch.ones(len(states))
-            if epoch > 10:  # After initial exploration
+            if epoch > 10:
                 _, _, sigma_e = self.wunn.predict_with_uncertainty(states.to(self.device))
-                weights = 0.7*sigma_e.squeeze() + 0.3*torch.linspace(0,1,len(states))  # Combine
-            
-            # Train batch
+                weights = 0.7 * sigma_e.squeeze() + 0.3 * torch.linspace(0, 1, len(states))
+
             idx = torch.multinomial(weights, len(states), replacement=True)
-            dataloader = DataLoader(TensorDataset(states[idx], normalized_targets[idx]), 
-                                batch_size=100, shuffle=True)
-            
+            dataloader = DataLoader(TensorDataset(states[idx], targets[idx]), batch_size=256, shuffle=True)
+
             for x_batch, y_batch in dataloader:
                 self.wunn_optimizer.zero_grad()
-                outputs = self.wunn(x_batch.to(self.device))
-                
-                # Split outputs
-                mean = outputs[:,0] * target_std + target_mean  # Denormalize
-                log_var = outputs[:,1]
-                
-                # Loss components
+                outputs = self.wunn(x_batch)
+                mean = outputs[:, 0].sigmoid() * targets.max()  # Scale to target range
+                log_var = outputs[:, 1]
                 var = torch.exp(log_var).clamp(min=1e-4)
-                nll_loss = ((mean - targets[idx])**2 / var + log_var).mean()
-                kl_div = sum(p.pow(2).sum() for p in self.wunn.parameters()) / (2 * 10)
                 
+                # Loss terms
+                nll_loss = ((mean - y_batch)**2 / var + log_var).mean()
+                kl_div = sum(p.pow(2).sum() for p in self.wunn.parameters()) / (2 * 1.0)  # σ₀² = 1
                 loss = nll_loss + self.beta * kl_div
+                
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.wunn.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(self.wunn.parameters(), 0.5)
                 self.wunn_optimizer.step()
+
+                epoch_loss += loss.item()
+                nll_loss_accum += nll_loss.item()
+                kl_loss_accum += kl_div.item()
+
+            print(f"[WUNN] Epoch {epoch+1}/100 | Loss: {epoch_loss:.4f} "
+                f"(NLL: {nll_loss_accum:.4f}, KL: {kl_loss_accum:.4f})")
+
+            # Adjust β dynamically
+            self.beta = min(0.1, self.beta * 1.05)  # Slowly increase β
 
     def _train_ffnn(self):
         """Train planning network with robust memory buffer handling"""
@@ -335,9 +366,6 @@ class LikelyAdmissibleHeuristicLearner:
         states = np.array(states)
         targets = np.array(targets)
 
-        print("\nTraining Data Summary:")
-        print(f"Number of samples: {len(states)}")
-        print(f"Targets - Min: {targets.min():.2f}, Max: {targets.max():.2f}, Mean: {targets.mean():.2f}")
 
         if len(states) > 0:
             sample_idx = np.random.randint(0, len(states))
@@ -361,7 +389,6 @@ def ida_star_search(start_puzzle, heuristic_fn, max_depth=100, timeout=60):
     """Iterative Deepening A* Search with heuristic function"""
     threshold = heuristic_fn(start_puzzle)
     start_time = time.time()
-    
     while True:
         result, path, cost = depth_limited_search(
             current_path=[start_puzzle],
@@ -423,17 +450,4 @@ def depth_limited_search(current_path, g, threshold, heuristic_fn, max_depth, st
             min_threshold = result
             
     return min_threshold, None, None
-
-# Add this before starting curriculum
-def warmup_wunn(wunn, device, n_samples=1000):
-    """Pretrain WUNN on random states"""
-    optimizer = optim.Adam(wunn.parameters(), lr=0.01)
-    for _ in range(100):  # 100 warmup iterations
-        states = torch.randn(n_samples, 128).to(device)  # Random states
-        targets = torch.randn(n_samples, 1).to(device) * 50  # Random costs
-        optimizer.zero_grad()
-        outputs = wunn(states)
-        loss = nn.MSELoss()(outputs[:,0], targets.squeeze())
-        loss.backward()
-        optimizer.step()
     

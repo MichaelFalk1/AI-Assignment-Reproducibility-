@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import traceback
+import copy
+from scipy.stats import norm
 import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from sliding_puzzle import SlidingPuzzle
@@ -41,14 +44,16 @@ class WUNN(nn.Module):
 class FFNNPlanner(nn.Module):
     def __init__(self, input_dim=2, hidden_dim=20):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, 1)
+        nn.init.kaiming_normal_(self.fc1.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.kaiming_normal_(self.fc2.weight, mode='fan_in', nonlinearity='relu')
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x):
-        return self.net(x)
+        x = torch.relu(self.fc1(x))
+        return self.fc2(x)
 
 class FFNNTrainer:
     def __init__(self, device='cpu'):
@@ -58,16 +63,13 @@ class FFNNTrainer:
         
     
     def prepare_features(self, wunn, states, targets):
-        """Robust feature preparation with shape validation"""
         try:
-            # Convert to tensors
-            states_tensor = torch.tensor(states, dtype=torch.float32)
-            targets_tensor = torch.tensor(targets, dtype=torch.float32).view(-1, 1)
+            states_tensor = torch.tensor(np.array(states), dtype=torch.float32)  # Convert to numpy array first
+            targets_tensor = torch.tensor(np.array(targets), dtype=torch.float32).view(-1, 1)
             
             if wunn is None:
                 return states_tensor.to(self.device), targets_tensor.to(self.device)
                 
-            # Get features from WUNN
             features = []
             batch_size = min(128, len(states_tensor))
             wunn.eval()
@@ -76,88 +78,137 @@ class FFNNTrainer:
                     batch = states_tensor[i:i+batch_size].to(self.device)
                     mean, sigma_a, _ = wunn.predict_with_uncertainty(batch)
                     
-                    # Ensure proper dimensions
-                    if mean.dim() == 1:
-                        mean = mean.unsqueeze(1)
-                    if sigma_a.dim() == 1:
-                        sigma_a = sigma_a.unsqueeze(1)
-                        
-                    features.append(torch.cat([mean, sigma_a], dim=1))
+                    # Stack features properly
+                    batch_features = torch.stack([mean, sigma_a], dim=1)
+                    features.append(batch_features)
             
-            return torch.cat(features).to(self.device), targets_tensor.to(self.device)
-            
+            features = torch.cat(features, dim=0)
+            features = (features - features.mean(dim=0)) / (features.std(dim=0) + 1e-6)
+            return features.to(self.device), targets_tensor.to(self.device)
         except Exception as e:
             print(f"Feature preparation error: {str(e)}")
-            # Fallback to direct state features
             return states_tensor.to(self.device), targets_tensor.to(self.device)
 
-    def train(self, wunn, ffnn, dataset, epochs=1000, lr=0.001):
-        """Robust training with error handling"""
+    def train(self, wunn, ffnn, dataset, epochs=1000, lr=1e-4):
         try:
-            # Prepare features
             states, targets = zip(*dataset)
+            
+            # Convert to tensors and ensure proper shapes
+            targets = torch.tensor(np.array(targets), dtype=torch.float32).view(-1, 1)
+            
+            # Prepare features and scale targets properly
             features, targets = self.prepare_features(wunn, states, targets)
             
-            # Create DataLoader
-            dataset = TensorDataset(features, targets)
-            dataloader = DataLoader(dataset, batch_size=100, shuffle=True)
+            # Debug prints for verification
+            print("\n=== Training Debug Info ===")
+            print(f"Features shape: {features.shape}")
+            print(f"Targets shape: {targets.shape}")
+            print(f"Sample features: {features[0]}")
+            print(f"Sample target: {targets[0].item()}")
+            print(f"Target stats - Min: {targets.min().item():.2f}, Max: {targets.max().item():.2f}, Mean: {targets.mean().item():.2f}")
             
-            # Training setup
+            # Normalize targets to [0,1] range
+            target_min = targets.min()
+            target_max = targets.max()
+            targets = (targets - target_min) / (target_max - target_min + 1e-6)
+            
+            dataset = TensorDataset(features, targets)
+            dataloader = DataLoader(dataset, batch_size=256, shuffle=True)
+            
             optimizer = optim.Adam(ffnn.parameters(), lr=lr)
             loss_fn = nn.MSELoss()
-            best_loss = float('inf')
+            
+            # Add learning rate scheduler
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
             
             ffnn.train()
+            best_loss = float('inf')
+            
             for epoch in range(epochs):
                 epoch_loss = 0.0
                 for x_batch, y_batch in dataloader:
                     optimizer.zero_grad()
                     outputs = ffnn(x_batch)
+                    
+                    # Scale outputs to match normalized targets
+                    outputs = torch.sigmoid(outputs)  # Constrain to [0,1]
+                    
                     loss = loss_fn(outputs, y_batch)
                     loss.backward()
+                    
+                    # Gradient clipping
                     torch.nn.utils.clip_grad_norm_(ffnn.parameters(), 1.0)
+                
                     optimizer.step()
                     epoch_loss += loss.item()
                 
                 avg_loss = epoch_loss / len(dataloader)
-                if epoch % 100 == 0:
-                    print(f"Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f}")
+                scheduler.step(avg_loss)
                 
-                # Early stopping if loss becomes NaN
+                # Early stopping check
+                if avg_loss < best_loss:
+                    best_loss = avg_loss
+                    best_model_state = copy.deepcopy(ffnn.state_dict())
+                
+                print(f"Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
+                
                 if torch.isnan(torch.tensor(avg_loss)):
                     print("Loss became NaN - stopping training")
                     break
-                    
+            
+            # Load best model
+            ffnn.load_state_dict(best_model_state)
+            
+            # Store scaling parameters for inference
+            ffnn.target_min = target_min
+            ffnn.target_max = target_max
+            
             return ffnn
             
         except Exception as e:
             print(f"Training error: {str(e)}")
-            # Return untrained model if error occurs
-            return FFNNPlanner(input_dim=features.shape[1], hidden_dim=20).to(self.device)
+            traceback.print_exc()
+            return FFNNPlanner(input_dim=features.shape[1] if 'features' in locals() else 2, 
+                            hidden_dim=20).to(self.device)
 
     def create_heuristic_fn(self, wunn, ffnn, y_q=None, epsilon=1.0):
         def heuristic(state):
             x = torch.tensor(state.to_one_hot(), dtype=torch.float32).unsqueeze(0).to(self.device)
             with torch.no_grad():
-                # Debug prints
-                print(f"Input shape: {x.shape}")  # Should be [1, 128]
-                
+                # Get predictions
                 mean, sigma_a, sigma_e = wunn.predict_with_uncertainty(x)
-                print(f"Mean: {mean.item():.2f}, Sigma_a: {sigma_a.item():.2f}, Sigma_e: {sigma_e.item():.2f}")
+                
+                # Apply sigmoid to ensure positive outputs
+                mean = torch.sigmoid(mean) * 50  # Scale to reasonable puzzle range (0-50)
+                sigma_a = torch.sigmoid(sigma_a) * 5  # Scale uncertainty appropriately
                 
                 features = torch.cat([mean.unsqueeze(1), sigma_a.unsqueeze(1)], dim=1)
-                print(f"Features shape: {features.shape}")  # Should be [1, 2]
                 
-                if y_q is not None:
-                    print(f"Comparison: mean={mean.item():.2f} vs y_q={y_q:.2f}")
+                # Debug prints
+                md = state.manhattan_distance()
+                print(f"\nState MD: {md}")
+                print(f"NN pred - mean: {mean.item():.2f}, σ_a: {sigma_a.item():.2f}, σ_e: {sigma_e.item():.2f}")
                 
-                if y_q is not None and mean < y_q:
-                    h = ffnn(features).item()
+                # Decision logic
+                if y_q is not None and mean.item() < y_q:
+                    # Scale FFNN output back to original range
+                    if hasattr(ffnn, 'target_min'):
+                        h = ffnn(features).item() * (ffnn.target_max - ffnn.target_min) + ffnn.target_min
+                    else:
+                        h = ffnn(features).item()
                     print(f"Using FFNN prediction: {h:.2f}")
                 else:
-                    h = max(mean.item() - 1.0 * (sigma_a.item() + epsilon), 0)
-                    print(f"Using conservative estimate: {h:.2f}")
-                    
-                print(f"Final heuristic: {h:.2f} vs Manhattan: {state.manhattan_distance()}")
+                    # Use uncertainty-adjusted estimate
+                    z = norm.ppf(min(self.alpha, 0.95))  # Cap alpha for numerical stability
+                    h = mean.item() + z * (sigma_a.item() + sigma_e.item())
+                    print(f"Using uncertainty-adjusted estimate: {h:.2f} (z={z:.2f})")
+                
+                # Ensure heuristic is reasonable compared to Manhattan distance
+                h = max(h, md * 0.9)  # Never less than 90% of MD
+                h = min(h, md * 2.0)  # Never more than 2x MD
+                
+                print(f"Final heuristic: {h:.2f} (MD: {md})")
+                
                 return h
+                
         return heuristic

@@ -17,17 +17,19 @@ def evaluate_heuristic(tasks, heuristic_fn):
     
     for task in tasks:
         start_time = time.time()
+        # Use the new ida_star_search signature (returns path, cost)
         path, cost = ida_star_search(task, heuristic_fn)
         elapsed = time.time() - start_time
-        
+
         if path:
             results['solved'] += 1
             optimal_cost = len(path) - 1  # Assuming we know optimal cost
-            subopt = (cost / optimal_cost - 1) * 100
+            subopt = (cost / optimal_cost - 1) * 100 if optimal_cost > 0 else 0
             results['suboptimality'] += subopt
-            results['avg_nodes'] += ...  # Track nodes generated
+            # Node counting: count number of states in the path as a proxy (for true node count, ida_star_search needs to return it)
+            results['avg_nodes'] += len(path)
         results['avg_time'] += elapsed
-    
+
     # Compute averages
     if results['solved'] > 0:
         results['suboptimality'] /= results['solved']
@@ -56,10 +58,10 @@ def run_efficiency_experiment():
     
     # Our approach (GTP)
     learner = LikelyAdmissibleHeuristicLearner(device,alpha=0.99,num_tasks_per_iter=10,epsilon=1,kappa=0.64,beta_0=0.05,gamma=0.9,memory_buffer_max=25000,t_max=60,)
-    learner.bootstrap_training()
+    learner.warmup_wunn(device='cpu')
     _, _, _, _ = learner.run_curriculum(
         puzzle_class=SlidingPuzzle,
-        num_iter=20
+        num_iter=5
     )
     gtp_results = evaluate_efficiency(learner, device)
     
@@ -119,8 +121,8 @@ def evaluate_hefficient_test(tasks, ffnn, wunn, device):
     def heuristic_fn(state):
         x = torch.tensor(state.to_one_hot(), dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
+            # Use the FFNN directly, but ensure input is correct shape
             return ffnn(x).item()
-    
     return evaluate_heuristic(tasks, heuristic_fn)
 
 if __name__ == "__main__":
