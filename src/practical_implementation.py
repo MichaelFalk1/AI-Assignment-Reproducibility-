@@ -172,7 +172,7 @@ class LikelyAdmissibleHeuristicLearner:
                 h_fn = heuristic_fn(task)
                 print(f"MD: {task.manhattan_distance():2d} -> H: {h_fn:.1f} (α={self.alpha:.2f}) (Solved: {tasks_solved}/{len(current_tasks)})")
                 # NOTE remeber to change this back just doing this to test ffnn
-                path, cost = self._solve_task(task, heuristic_fn=heuristic_fn)
+                path, cost, nodes_generated = self._solve_task(task, heuristic_fn=heuristic_fn)
                 if path:
                     tasks_solved += 1
                     self._update_memory_buffer(path, cost)
@@ -245,10 +245,9 @@ class LikelyAdmissibleHeuristicLearner:
                 print(f"MD: {s.manhattan_distance():2d} -> H: {h:.1f} (α={self.alpha:.2f})")
 
     def _solve_task(self, task, heuristic_fn):
-        
         start_time = time.time()
-        path, cost = ida_star_search(task, heuristic_fn, timeout=self.t_max)
-        return path, cost
+        path, cost, nodes_generated = ida_star_search(task, heuristic_fn)
+        return path, cost, nodes_generated
 
     def _update_memory_buffer(self, path, cost):
         
@@ -386,68 +385,61 @@ class LikelyAdmissibleHeuristicLearner:
 
 
 def ida_star_search(start_puzzle, heuristic_fn, max_depth=100, timeout=60):
-    """Iterative Deepening A* Search with heuristic function"""
+    """Iterative Deepening A* Search with heuristic function and node counting"""
     threshold = heuristic_fn(start_puzzle)
     start_time = time.time()
     while True:
-        result, path, cost = depth_limited_search(
+        result, path, cost, nodes_generated = depth_limited_search(
             current_path=[start_puzzle],
             g=0,
             threshold=threshold,
             heuristic_fn=heuristic_fn,
             max_depth=max_depth,
             start_time=start_time,
-            timeout=timeout
+            timeout=timeout,
+            nodes_generated=0
         )
-        
         if result == "FOUND":
-            return path, cost
+            return path, cost, nodes_generated
         elif result == float('inf'):
-            return None, None
+            return None, None, nodes_generated
         elif time.time() - start_time > timeout:
             print("IDA* timeout reached")
-            return None, None
-        
+            return None, None, nodes_generated
         threshold = result
 
-def depth_limited_search(current_path, g, threshold, heuristic_fn, max_depth, start_time, timeout):
-    """Helper function for IDA*"""
+def depth_limited_search(current_path, g, threshold, heuristic_fn, max_depth, start_time, timeout, nodes_generated):
+    """Helper function for IDA* with node counting"""
     current_state = current_path[-1]
     f = g + heuristic_fn(current_state)
-    
+    nodes_generated += 1
+
     if time.time() - start_time > timeout:
-        return float('inf'), None, None
-        
+        return float('inf'), None, None, nodes_generated
     if f > threshold:
-        return f, None, None
-        
+        return f, None, None, nodes_generated
     if current_state.is_solved():
-        return "FOUND", current_path, len(current_path)-1
-        
+        return "FOUND", current_path, len(current_path)-1, nodes_generated
     if g >= max_depth:
-        return float('inf'), None, None
-        
+        return float('inf'), None, None, nodes_generated
+
     min_threshold = float('inf')
     for move in current_state.get_legal_moves():
         neighbor = current_state.move(move)
-        
         if any(np.array_equal(neighbor.to_array(), p.to_array()) for p in current_path):
             continue
-            
-        result, solution_path, cost = depth_limited_search(
+        result, solution_path, cost, nodes_generated = depth_limited_search(
             current_path + [neighbor],
             g + 1,
             threshold,
             heuristic_fn,
             max_depth,
             start_time,
-            timeout
+            timeout,
+            nodes_generated
         )
-        
         if result == "FOUND":
-            return "FOUND", solution_path, cost
+            return "FOUND", solution_path, cost, nodes_generated
         if result < min_threshold:
             min_threshold = result
-            
-    return min_threshold, None, None
-    
+    return min_threshold, None, None, nodes_generated

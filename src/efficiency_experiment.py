@@ -14,28 +14,21 @@ def evaluate_heuristic(tasks, heuristic_fn):
         'avg_nodes': 0,
         'avg_time': 0
     }
-    
     for task in tasks:
         start_time = time.time()
-        # Use the new ida_star_search signature (returns path, cost)
-        path, cost = ida_star_search(task, heuristic_fn)
+        path, cost, nodes_generated = ida_star_search(task, heuristic_fn)
         elapsed = time.time() - start_time
-
         if path:
             results['solved'] += 1
-            optimal_cost = len(path) - 1  # Assuming we know optimal cost
+            optimal_cost = len(path) - 1
             subopt = (cost / optimal_cost - 1) * 100 if optimal_cost > 0 else 0
             results['suboptimality'] += subopt
-            # Node counting: count number of states in the path as a proxy (for true node count, ida_star_search needs to return it)
-            results['avg_nodes'] += len(path)
+            results['avg_nodes'] += nodes_generated
         results['avg_time'] += elapsed
-
-    # Compute averages
     if results['solved'] > 0:
         results['suboptimality'] /= results['solved']
         results['avg_nodes'] /= results['solved']
     results['avg_time'] /= len(tasks)
-    
     return results
 
 
@@ -67,7 +60,9 @@ def run_efficiency_experiment():
     
     # Compare with fixed step approaches
     fixed_step_results = {}
-    for length_inc in [1, 2, 4, 6, 8, 10]:
+    for length_inc in [1,4,7,10]:
+        print(f"Evaluating fixed step curriculum with length increment {length_inc}...")
+         # Create a learner for fixed step curriculum
         results = evaluate_fixed_step(length_inc, device)
         fixed_step_results[length_inc] = results
     
@@ -85,7 +80,7 @@ def evaluate_efficiency(learner, device):
     solved_train = np.mean(learner.solved_history) * 10  # Convert to percentage
     
     # Test performance
-    test_tasks = [SlidingPuzzle().shuffle(k+1) for k in range(100)]
+    test_tasks = [SlidingPuzzle().shuffle(k+1) for k in range(20)]
     results = evaluate_hefficient_test(test_tasks, learner.ffnn, learner.wunn, device)
     
     return {
@@ -104,11 +99,11 @@ def evaluate_fixed_step(length_inc, device):
                     task = task.move(random.choice(task.get_legal_moves()))
                 tasks.append(task)
             return tasks
-    
+    print(f"Running fixed step curriculum with length increment {length_inc}...")
     learner = FixedStepLearner(device, num_tasks_per_iter=10, t_max=1)
-    _, _, _, solved_history = learner.run_curriculum(SlidingPuzzle, num_iter=20)
+    _, _, _, solved_history = learner.run_curriculum(SlidingPuzzle, num_iter=2)
     
-    test_tasks = [SlidingPuzzle().shuffle(k+1) for k in range(100)]
+    test_tasks = [SlidingPuzzle().shuffle(k+1) for k in range(30)]
     results = evaluate_hefficient_test(test_tasks, learner.ffnn, learner.wunn, device)
     
     return {
@@ -121,8 +116,10 @@ def evaluate_hefficient_test(tasks, ffnn, wunn, device):
     def heuristic_fn(state):
         x = torch.tensor(state.to_one_hot(), dtype=torch.float32).unsqueeze(0).to(device)
         with torch.no_grad():
-            # Use the FFNN directly, but ensure input is correct shape
-            return ffnn(x).item()
+            # Use WUNN to get mean and sigma_a, then pass as features to FFNN
+            mean, sigma_a, _ = wunn.predict_with_uncertainty(x)
+            features = torch.cat([mean.unsqueeze(1), sigma_a.unsqueeze(1)], dim=1)
+            return ffnn(features).item()
     return evaluate_heuristic(tasks, heuristic_fn)
 
 if __name__ == "__main__":

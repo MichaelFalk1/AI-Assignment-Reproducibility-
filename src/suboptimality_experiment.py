@@ -23,30 +23,28 @@ def evaluate_heuristic(tasks, heuristic_fn):
         'solved': 0,
         'suboptimality': 0,
         'avg_time': 0,
-        'optimal': 0
+        'optimal': 0,
+        'avg_nodes': 0
     }
-    
     for task in tasks:
         start_time = time.time()
-        path, cost = ida_star_search(task, heuristic_fn)  # Modified to return nodes_generated
+        path, cost, nodes_generated = ida_star_search(task, heuristic_fn)
         elapsed = time.time() - start_time
-        
         if path:
             results['solved'] += 1
             optimal_cost = len(path) - 1
             subopt = (cost / optimal_cost - 1) * 100
             results['suboptimality'] += subopt
-            if subopt < 1e-6:  # Considered optimal if within 0.0001%
+            if subopt < 1e-6:
                 results['optimal'] += 1
+            results['avg_nodes'] += nodes_generated
         results['avg_time'] += elapsed
-    
-    # Compute averages
     n_tasks = len(tasks)
     if results['solved'] > 0:
         results['suboptimality'] /= results['solved']
-        results['optimal'] = (results['optimal'] / n_tasks) * 100  # Convert to percentage
+        results['optimal'] = (results['optimal'] / n_tasks) * 100
+        results['avg_nodes'] /= results['solved']
     results['avg_time'] /= n_tasks
-    
     return results
 def run_suboptimality_experiment():
     device = torch.device('cpu')
@@ -100,20 +98,20 @@ def run_suboptimality_experiment():
     # Evaluate main configuration
     main_results = evaluate_heuristic(benchmark_tasks, heuristic_fn)
     print("Main results")
-    print(f"{main_results['avg_time']:.1f}  {main_results['suboptimality']:.1f}%  {main_results['optimal']:.1f}%")
+    print(f"{main_results['avg_time']:.1f}  {main_results['suboptimality']:.1f}%  {main_results['optimal']:.1f}%  {main_results['avg_nodes']:.1f} nodes")
 
         
     
     # Print results table
     print("\nSuboptimality Results for 15-puzzle:")
-    print("α      Time       Subopt  Optimal")
+    print("α    Time    Nodes   Subopt  Optimal")
     print("------------------------------------------")
     
     # Evaluate different alpha values
     alpha_results = {}
     for alpha in [0.95, 0.9, 0.75, 0.5, 0.25, 0.1, 0.05]:
         results = evaluate_for_alpha(alpha, benchmark_tasks, ffnn, wunn, device, y_q)
-        print(f"{alpha:<6} {results['avg_time']:.1f}  {results['suboptimality']:.1f}%  {results['optimal']:.1f}%")
+        print(f"{alpha:<6} {results['avg_time']:.1f}  {results['avg_nodes']:.1f}    {results['suboptimality']:.1f}%  {results['optimal']:.1f}%")
         alpha_results[alpha] = results
     
     # Compare with single output FFNN if needed
