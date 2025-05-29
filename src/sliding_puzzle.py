@@ -70,13 +70,6 @@ class SlidingPuzzle:
         return str(self.board)
     
     def to_one_hot(self):
-        """
-        Convert puzzle state to one-hot encoding as described in the paper:
-        - For each of the 16 numbers (0-15), encode:
-          - row position (4 bits one-hot)
-          - column position (4 bits one-hot)
-        - Total: 16 numbers * (4 + 4) = 128 bits (16 bytes)
-        """
         one_hot = np.zeros(16 * 2 * 4, dtype=np.float32)  # 128-dimensional vector
         
         for number in range(16):  # All numbers from 0 to 15
