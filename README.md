@@ -29,7 +29,7 @@ This repository contains a Python implementation reproducing the paper:
 
 ### Setup
 ```bash
-git clone https://***************  # <-- Add your repo link here
+git clone https://github.com/MichaelFalk1/AI-Assignment-Reproducibility-.git # <-- Add your repo link here
 cd reproducibility-assignment
 
 # With Poetry (recommended):
@@ -78,7 +78,6 @@ python src/efficiency_experiment.py
 ├── practical_implementation.py  # Core training algorithms and curriculum learning
 ├── suboptimality_experiment.py  # Suboptimality experiment (Table 1 reproduction)
 ├── efficiency_experiment.py     # Efficiency experiment (Table 2 reproduction)
-├── requirements.txt             # Python dependencies
 └── README.md                    # This document
 ```
 
